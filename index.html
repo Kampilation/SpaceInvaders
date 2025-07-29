@@ -1,0 +1,554 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Space Invaders - Eye Tracking</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background: #000;
+            color: #fff;
+            font-family: 'Courier New', monospace;
+            overflow: hidden;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+        }
+        
+        #gameContainer {
+            position: relative;
+            width: 800px;
+            height: 600px;
+            border: 2px solid #0ff;
+            background: radial-gradient(ellipse at center, #001133 0%, #000 100%);
+        }
+        
+        #videoContainer {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            width: 200px;
+            height: 150px;
+            border: 2px solid #0ff;
+            background: rgba(0, 0, 0, 0.8);
+            z-index: 100;
+        }
+        
+        #video {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            transform: scaleX(-1);
+        }
+        
+        canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+        }
+        
+        #startScreen, #gameOverScreen {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.9);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            z-index: 200;
+        }
+        
+        #gameOverScreen {
+            display: none;
+        }
+        
+        button {
+            padding: 15px 30px;
+            font-size: 20px;
+            background: #0ff;
+            color: #000;
+            border: none;
+            cursor: pointer;
+            font-family: 'Courier New', monospace;
+            font-weight: bold;
+            margin-top: 20px;
+            transition: all 0.3s;
+        }
+        
+        button:hover {
+            background: #fff;
+            transform: scale(1.1);
+        }
+        
+        h1 {
+            font-size: 48px;
+            margin: 20px 0;
+            text-shadow: 0 0 20px #0ff;
+            animation: glow 2s ease-in-out infinite;
+        }
+        
+        @keyframes glow {
+            0%, 100% { text-shadow: 0 0 20px #0ff; }
+            50% { text-shadow: 0 0 40px #0ff, 0 0 60px #00f; }
+        }
+        
+        #score {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            font-size: 24px;
+            z-index: 100;
+        }
+        
+        #instructions {
+            text-align: center;
+            max-width: 600px;
+            line-height: 1.6;
+            color: #0ff;
+        }
+        
+        .warning {
+            color: #ff0;
+            font-size: 14px;
+            margin-top: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div id="gameContainer">
+        <div id="score">Score: 0</div>
+        <div id="videoContainer">
+            <video id="video" autoplay muted></video>
+        </div>
+        <canvas id="gameCanvas" width="800" height="600"></canvas>
+        
+        <div id="startScreen">
+            <h1>SPACE INVADERS</h1>
+            <div id="instructions">
+                <p>Control your spaceship with your EYES!</p>
+                <p>Look left/right to move, look up to fire!</p>
+                <p>You have only ONE LIFE - protect Earth!</p>
+                <p class="warning">Please allow camera access when prompted</p>
+            </div>
+            <button onclick="startGame()">START GAME</button>
+        </div>
+        
+        <div id="gameOverScreen">
+            <h1>GAME OVER</h1>
+            <p style="font-size: 24px;">Final Score: <span id="finalScore">0</span></p>
+            <button onclick="restartGame()">PLAY AGAIN</button>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+    
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const video = document.getElementById('video');
+        const scoreElement = document.getElementById('score');
+        const startScreen = document.getElementById('startScreen');
+        const gameOverScreen = document.getElementById('gameOverScreen');
+        const finalScoreElement = document.getElementById('finalScore');
+        
+        let gameRunning = false;
+        let score = 0;
+        let eyeX = 0.5;
+        let eyeY = 0.5;
+        let lastFireTime = 0;
+        const fireDelay = 500;
+        // Blink detection
+        let blinkCooldown = false;
+        const BLINK_THRESHOLD = 0.22; // Lower = more sensitive
+        let lastLeftEAR = 1, lastRightEAR = 1;
+        let blinked = false;
+        
+        // Game objects
+        const spaceship = {
+            x: 400,
+            y: 520,
+            width: 60,
+            height: 40,
+            speed: 8
+        };
+        
+        const bullets = [];
+        const aliens = [];
+        const alienBullets = [];
+        const particles = [];
+        
+        // Alien wave configuration
+        let alienRows = 5;
+        let alienCols = 10;
+        let alienSpeed = 0.5;
+        let alienDirection = 1;
+        let alienDropDistance = 20;
+        let lastAlienShoot = 0;
+        let alienShootDelay = 2000;
+        
+        // Initialize MediaPipe
+        const faceMesh = new FaceMesh({
+            locateFile: (file) => {
+                return `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`;
+            }
+        });
+        
+        faceMesh.setOptions({
+            maxNumFaces: 1,
+            refineLandmarks: true,
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5
+        });
+        
+        faceMesh.onResults(onResults);
+        
+        function getEAR(landmarks, left=true) {
+            // Use 6 points for each eye
+            // Left: 33, 160, 158, 133, 153, 144
+            // Right: 362, 385, 387, 263, 373, 380
+            const idx = left ?
+                [33, 160, 158, 133, 153, 144] :
+                [362, 385, 387, 263, 373, 380];
+            const p = idx.map(i => landmarks[i]);
+            function dist(a, b) { return Math.hypot(a.x-b.x, a.y-b.y); }
+            return (dist(p[1],p[5]) + dist(p[2],p[4])) / (2*dist(p[0],p[3]));
+        }
+        
+        function onResults(results) {
+            if (results.multiFaceLandmarks && results.multiFaceLandmarks[0]) {
+                const landmarks = results.multiFaceLandmarks[0];
+                
+                // Get eye landmarks
+                const leftEye = landmarks[33];
+                const rightEye = landmarks[263];
+                const noseTip = landmarks[1];
+                
+                // Calculate eye position
+                eyeX = (leftEye.x + rightEye.x) / 2;
+                eyeY = (leftEye.y + rightEye.y) / 2;
+                
+                // --- BLINK DETECTION ---
+                const leftEAR = getEAR(landmarks, true);
+                const rightEAR = getEAR(landmarks, false);
+                // Blink: both eyes EAR below threshold, and not in cooldown
+                if (leftEAR < BLINK_THRESHOLD && rightEAR < BLINK_THRESHOLD && !blinkCooldown && gameRunning) {
+                    blinked = true;
+                    blinkCooldown = true;
+                    setTimeout(() => { blinkCooldown = false; }, 400); // prevent double fire
+                }
+            }
+        }
+        
+        async function setupCamera() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: { width: 640, height: 480 }
+                });
+                video.srcObject = stream;
+                
+                const camera = new Camera(video, {
+                    onFrame: async () => {
+                        await faceMesh.send({ image: video });
+                    },
+                    width: 640,
+                    height: 480
+                });
+                camera.start();
+            } catch (error) {
+                console.error('Error accessing camera:', error);
+                alert('Camera access is required to play this game!');
+            }
+        }
+        
+        function createAliens() {
+            aliens.length = 0;
+            for (let row = 0; row < alienRows; row++) {
+                for (let col = 0; col < alienCols; col++) {
+                    aliens.push({
+                        x: 100 + col * 60,
+                        y: 50 + row * 50,
+                        width: 40,
+                        height: 30,
+                        type: row < 2 ? 'strong' : 'normal',
+                        points: row < 2 ? 20 : 10
+                    });
+                }
+            }
+        }
+        
+        function fireBullet() {
+            bullets.push({
+                x: spaceship.x + spaceship.width / 2,
+                y: spaceship.y,
+                width: 4,
+                height: 10,
+                speed: 10
+            });
+        }
+        
+        function alienFire() {
+            if (aliens.length === 0) return;
+            
+            const bottomAliens = [];
+            const cols = {};
+            
+            aliens.forEach(alien => {
+                const col = Math.floor(alien.x / 60);
+                if (!cols[col] || alien.y > cols[col].y) {
+                    cols[col] = alien;
+                }
+            });
+            
+            Object.values(cols).forEach(alien => {
+                if (Math.random() < 0.003) { // Lower frequency
+                    alienBullets.push({
+                        x: alien.x + alien.width / 2,
+                        y: alien.y + alien.height,
+                        width: 4,
+                        height: 10,
+                        speed: 0.6 // Even slower alien bullet speed
+                    });
+                }
+            });
+        }
+        
+        function createParticles(x, y, color) {
+            for (let i = 0; i < 10; i++) {
+                particles.push({
+                    x: x,
+                    y: y,
+                    vx: (Math.random() - 0.5) * 5,
+                    vy: (Math.random() - 0.5) * 5,
+                    life: 30,
+                    color: color
+                });
+            }
+        }
+        
+        function updateGame() {
+            if (!gameRunning) return;
+            
+            // Update spaceship position based on eye tracking
+            const targetX = (1 - eyeX) * canvas.width;
+            spaceship.x += (targetX - spaceship.x - spaceship.width / 2) * 0.1;
+            spaceship.x = Math.max(0, Math.min(canvas.width - spaceship.width, spaceship.x));
+            
+            // --- FIRE ON BLINK ---
+            if (blinked && Date.now() - lastFireTime > fireDelay) {
+                fireBullet();
+                lastFireTime = Date.now();
+                blinked = false;
+            }
+            
+            // Update bullets
+            for (let i = bullets.length - 1; i >= 0; i--) {
+                bullets[i].y -= bullets[i].speed;
+                if (bullets[i].y < 0) {
+                    bullets.splice(i, 1);
+                }
+            }
+            
+            // Update alien bullets
+            for (let i = alienBullets.length - 1; i >= 0; i--) {
+                alienBullets[i].y += alienBullets[i].speed;
+                if (alienBullets[i].y > canvas.height) {
+                    alienBullets.splice(i, 1);
+                }
+            }
+            
+            // Update aliens
+            let shouldDrop = false;
+            aliens.forEach(alien => {
+                alien.x += alienSpeed * alienDirection;
+                if (alien.x <= 0 || alien.x + alien.width >= canvas.width) {
+                    shouldDrop = true;
+                }
+            });
+            
+            if (shouldDrop) {
+                alienDirection *= -1;
+                aliens.forEach(alien => {
+                    alien.y += alienDropDistance;
+                });
+                alienSpeed += 0.1;
+            }
+            
+            // Alien shooting
+            alienFire();
+            
+            // Check collisions
+            checkCollisions();
+            
+            // Update particles
+            for (let i = particles.length - 1; i >= 0; i--) {
+                particles[i].x += particles[i].vx;
+                particles[i].y += particles[i].vy;
+                particles[i].life--;
+                if (particles[i].life <= 0) {
+                    particles.splice(i, 1);
+                }
+            }
+            
+            // Check win condition
+            if (aliens.length === 0) {
+                nextWave();
+            }
+            
+            // Check lose conditions
+            aliens.forEach(alien => {
+                if (alien.y + alien.height >= spaceship.y) {
+                    gameOver();
+                }
+            });
+        }
+        
+        function checkCollisions() {
+            // Bullets vs Aliens
+            for (let i = bullets.length - 1; i >= 0; i--) {
+                for (let j = aliens.length - 1; j >= 0; j--) {
+                    if (collides(bullets[i], aliens[j])) {
+                        createParticles(aliens[j].x + aliens[j].width / 2, aliens[j].y + aliens[j].height / 2, '#0f0');
+                        score += aliens[j].points;
+                        updateScore();
+                        bullets.splice(i, 1);
+                        aliens.splice(j, 1);
+                        break;
+                    }
+                }
+            }
+            
+            // Alien bullets vs Spaceship
+            for (let i = alienBullets.length - 1; i >= 0; i--) {
+                if (collides(alienBullets[i], spaceship)) {
+                    createParticles(spaceship.x + spaceship.width / 2, spaceship.y + spaceship.height / 2, '#f00');
+                    gameOver();
+                    return;
+                }
+            }
+        }
+        
+        function collides(a, b) {
+            return a.x < b.x + b.width &&
+                   a.x + a.width > b.x &&
+                   a.y < b.y + b.height &&
+                   a.y + a.height > b.y;
+        }
+        
+        function nextWave() {
+            alienSpeed += 0.2;
+            alienShootDelay = Math.max(500, alienShootDelay - 200);
+            createAliens();
+        }
+        
+        function drawGame() {
+            // Clear canvas
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.1)';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            
+            // Draw stars
+            ctx.fillStyle = '#fff';
+            for (let i = 0; i < 50; i++) {
+                const x = (i * 73 + Date.now() * 0.01) % canvas.width;
+                const y = (i * 37) % canvas.height;
+                ctx.fillRect(x, y, 1, 1);
+            }
+            
+            // Draw spaceship
+            ctx.fillStyle = '#0ff';
+            ctx.beginPath();
+            ctx.moveTo(spaceship.x + spaceship.width / 2, spaceship.y);
+            ctx.lineTo(spaceship.x, spaceship.y + spaceship.height);
+            ctx.lineTo(spaceship.x + spaceship.width / 2, spaceship.y + spaceship.height * 0.7);
+            ctx.lineTo(spaceship.x + spaceship.width, spaceship.y + spaceship.height);
+            ctx.closePath();
+            ctx.fill();
+            
+            // Draw aliens
+            aliens.forEach(alien => {
+                ctx.fillStyle = alien.type === 'strong' ? '#f0f' : '#0f0';
+                ctx.fillRect(alien.x, alien.y, alien.width, alien.height);
+                
+                // Alien details
+                ctx.fillStyle = '#000';
+                ctx.fillRect(alien.x + 5, alien.y + 5, 5, 5);
+                ctx.fillRect(alien.x + alien.width - 10, alien.y + 5, 5, 5);
+                ctx.fillRect(alien.x + alien.width / 2 - 5, alien.y + alien.height - 10, 10, 5);
+            });
+            
+            // Draw bullets
+            ctx.fillStyle = '#ff0';
+            bullets.forEach(bullet => {
+                ctx.fillRect(bullet.x - bullet.width / 2, bullet.y, bullet.width, bullet.height);
+            });
+            
+            // Draw alien bullets
+            ctx.fillStyle = '#f00';
+            alienBullets.forEach(bullet => {
+                ctx.fillRect(bullet.x - bullet.width / 2, bullet.y, bullet.width, bullet.height);
+            });
+            
+            // Draw particles
+            particles.forEach(particle => {
+                ctx.fillStyle = particle.color + Math.floor(particle.life / 30 * 255).toString(16).padStart(2, '0');
+                ctx.fillRect(particle.x, particle.y, 3, 3);
+            });
+            
+            // Draw eye indicator
+            if (gameRunning) {
+                ctx.strokeStyle = '#0ff';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.arc(spaceship.x + spaceship.width / 2, spaceship.y - 20, 10, 0, Math.PI * 2);
+                ctx.stroke();
+                ctx.fillStyle = eyeY < 0.4 ? '#ff0' : '#0ff';
+                ctx.beginPath();
+                ctx.arc(spaceship.x + spaceship.width / 2, spaceship.y - 20, 5, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+        
+        function updateScore() {
+            scoreElement.textContent = `Score: ${score}`;
+        }
+        
+        function gameLoop() {
+            updateGame();
+            drawGame();
+            requestAnimationFrame(gameLoop);
+        }
+        
+        function startGame() {
+            startScreen.style.display = 'none';
+            gameRunning = true;
+            score = 0;
+            updateScore();
+            bullets.length = 0;
+            alienBullets.length = 0;
+            particles.length = 0;
+            alienSpeed = 0.5;
+            alienDirection = 1;
+            createAliens();
+            setupCamera();
+            gameLoop();
+        }
+        
+        function gameOver() {
+            gameRunning = false;
+            finalScoreElement.textContent = score;
+            gameOverScreen.style.display = 'flex';
+        }
+        
+        function restartGame() {
+            gameOverScreen.style.display = 'none';
+            startGame();
+        }
+    </script>
+</body>
+</html>
